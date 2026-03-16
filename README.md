@@ -1,19 +1,20 @@
-# 64-Bit Calculator
+# 32-Bit Calculator with 64-Bit Memory Organization
 
-A SystemVerilog-based 64-bit calculator design with comprehensive UVM-style verification environment. The design implements a memory-based calculator that reads operands from dual-port SRAM, performs 32-bit additions, and writes results back to memory.
+A SystemVerilog-based calculator design with a class-based verification environment modeled on UVM methodology. The design reads 64-bit words from dual-bank SRAM, performs 32-bit additions on each half, and writes results back to memory.
 
 ## Project Overview
 
-This project consists of a complete RTL implementation of a 64-bit calculator system and its verification testbench. The calculator reads 64-bit operands from memory (split across two 32-bit SRAM blocks), performs arithmetic operations, and stores results back to memory.
+This project consists of RTL implementation of a calculator system and its verification testbench. The calculator reads 64-bit memory words (split across two 32-bit SRAM blocks), adds the lower and upper 32-bit halves of each word, and stores results back to memory via a 64-bit result buffer.
 
 ### Key Features
 
-- **64-bit data path** with dual 32-bit SRAM blocks (Sky130 SRAM macro)
+- **Dual 32-bit SRAM banks** using Sky130 SRAM macros for 64-bit memory word organization
 - **FSM-based controller** managing read, add, and write operations
-- **Result buffering** for pipelined operation
+- **32-bit ripple-carry adder** built from chained full adders using generate constructs
+- **64-bit result buffer** for accumulating two 32-bit sums before writeback
 - **Comprehensive verification** with directed and randomized testing
 - **SystemVerilog Assertions (SVA)** for protocol checking
-- **UVM-style testbench** with driver, monitor, sequencer, and scoreboard
+- **Class-based testbench** modeled on UVM methodology with driver, monitor, sequencer, and scoreboard
 
 ## Architecture
 
@@ -25,27 +26,29 @@ This project consists of a complete RTL implementation of a 64-bit calculator sy
 
 - **`controller.sv`**: FSM-based control logic
   - States: `S_IDLE`, `S_READ`, `S_ADD`, `S_WRITE`, `S_END`
-  - Manages memory read/write sequencing
-  - Controls buffer location selection
+  - Reads pairs of 64-bit words, feeds each word's two 32-bit halves to the adder
+  - Toggles buffer location to store lower and upper 32-bit results
+  - Synchronous active-high reset
 
 - **`adder32.sv`**: 32-bit ripple-carry adder
-  - Composed of 32 full adders
-  - Performs arithmetic addition
+  - Composed of 32 full adders via generate-for construct
+  - Produces 32-bit sum (carry-out is not propagated)
 
 - **`full_adder.sv`**: Single-bit full adder building block
 
 - **`result_buffer.sv`**: 64-bit result buffer
-  - Stores lower and upper 32-bit halves
+  - Stores two sequential 32-bit addition results (lower and upper halves)
   - Location selector for sequential writes
+  - Synchronous active-high reset
 
 - **`sky130_sram_2kbyte_1rw1r_32x512_8.sv`**: Dual-port SRAM macro
-  - 512 words × 32 bits
+  - 512 words x 32 bits
   - Port 0: Read/Write
   - Port 1: Read-only
 
 - **`calculator_pkg.sv`**: Design parameter package
-  - `DATA_W = 32`: Data width
-  - `MEM_WORD_SIZE = 64`: Memory word size
+  - `DATA_W = 32`: Data width (adder operand size)
+  - `MEM_WORD_SIZE = 64`: Memory word size (two SRAM banks combined)
   - `ADDR_W = 9`: Address width (512 entries)
 
 ### Testbench Components (`tb/`)
@@ -61,7 +64,7 @@ This project consists of a complete RTL implementation of a 64-bit calculator sy
 
 - **`calc_driver.svh`**: Test driver
   - Drives stimulus to DUT
-  - Initializes SRAM contents
+  - Initializes SRAM contents via backdoor writes
   - Controls start/reset sequences
 
 - **`calc_monitor.svh`**: Transaction monitor
@@ -70,14 +73,14 @@ This project consists of a complete RTL implementation of a 64-bit calculator sy
 
 - **`calc_sequencer.svh`**: Test sequence generator
   - Generates randomized test sequences
-  - Creates transaction items
+  - Creates constrained-random transaction items
 
 - **`calc_seq_item.svh`**: Transaction item definition
-  - Encapsulates test data
+  - Encapsulates test data with address range constraints
 
 - **`calc_sb.svh`**: Scoreboard
-  - Verifies DUT behavior
-  - Compares expected vs actual results
+  - Maintains SRAM memory mirrors
+  - Computes expected 32-bit sums and compares against DUT output
 
 - **`calc_tb_pkg.sv`**: Testbench package
   - Imports verification components
@@ -150,6 +153,24 @@ verdi -ssf simulation.fsdb &
 simvision waves.shm &
 ```
 
+## Operation Flow
+
+1. **Initialization**: SRAM banks loaded with operands via testbench backdoor writes
+2. **Read Phase**: Controller reads a 64-bit word (32 bits from each SRAM bank)
+3. **Add Phase**: 32-bit adder computes `SRAM_A[addr] + SRAM_B[addr]`
+4. **Buffer Phase**: 32-bit result stored in lower or upper half of the result buffer
+5. **Repeat**: Steps 2-4 repeat for the next address, filling the other buffer half
+6. **Write Phase**: Combined 64-bit result buffer written back to SRAM
+7. **End State**: Controller enters `S_END` and remains there until reset
+
+## Memory Organization
+
+- **64-bit words** split across two SRAM banks:
+  - `sram_A`: Lower 32 bits (bits [31:0])
+  - `sram_B`: Upper 32 bits (bits [63:32])
+- **Address space**: 512 entries (9-bit addressing)
+- The adder operates on 32-bit halves independently; there is no carry propagation between lower and upper halves
+
 ## Test Cases
 
 ### Directed Tests
@@ -175,13 +196,13 @@ simvision waves.shm &
 
 6. **Reset-at-State Tests** (`tb/calc_tb_top.sv:344`)
    - Pulses reset at each FSM state
-   - Validates reset behavior
+   - Validates reset recovery behavior
 
 ### Randomized Testing
 
 - **200 random transactions** (`tb/calc_tb_top.sv:363`)
-- Generated by sequencer, executed by driver
-- Validated by scoreboard
+- Generated by sequencer with constrained-random addresses
+- Executed by driver, validated by scoreboard
 
 ## SystemVerilog Assertions
 
@@ -193,35 +214,13 @@ The testbench includes several SVA checks (`tb/calc_tb_top.sv:380`):
 4. Valid address ranges (end >= start)
 5. Ready signal consistency with FSM state
 
-## Operation Flow
-
-1. **Initialization**: SRAM loaded with operands
-2. **Read Phase**: Controller reads operands from specified address range
-3. **Add Phase**: 32-bit adder computes sum
-4. **Write Phase**: Results written to output address range
-5. **End State**: Ready signal asserted
-
-## Memory Organization
-
-- **64-bit words** split across two SRAM blocks:
-  - `sram_A`: Lower 32 bits (bits [31:0])
-  - `sram_B`: Upper 32 bits (bits [63:32])
-- **Address space**: 512 entries (9-bit addressing)
-
 ## Known Limitations
 
-- Only supports addition operations (no subtraction/multiplication)
-- 32-bit arithmetic (64-bit memory organization)
+- Only supports addition (no subtraction, multiplication, or other operations)
+- 32-bit arithmetic with no carry propagation between halves
 - Sequential operation (no pipelining between transactions)
-
-## Contributing
-
-When modifying the design:
-
-1. Update RTL files in `rtl/` directory
-2. Add corresponding test cases in `calc_tb_top.sv`
-3. Update scoreboard logic if verification changes needed
-4. Run full test suite to ensure no regressions
+- No external output ports; results are only observable via SRAM backdoor reads
+- Controller stays in `S_END` indefinitely until externally reset
 
 ## License
 
